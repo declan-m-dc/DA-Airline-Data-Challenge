@@ -21,6 +21,12 @@ Flights$DISTANCE <- as.numeric(Flights$DISTANCE)
 Flights$AIR_TIME <- as.numeric(Flights$AIR_TIME)
 Flights <- Flights %>%
   filter(CANCELLED == 0.00) # Filter to only non-cancelled flights
+Flights$Normalized_Dep_Delay <- if_else(Flights$DEP_DELAY > 15,
+                                        Flights$DEP_DELAY - 15,
+                                        0)
+Flights$Normalized_Arr_Delay <- if_else(Flights$ARR_DELAY > 15,
+                                        Flights$ARR_DELAY - 15,
+                                        0)
 
 Airport_Codes <- Airport_Codes %>%
   filter(TYPE == "medium_airport" | TYPE == "large_airport") %>% # Filter to medium and large airports
@@ -59,61 +65,55 @@ Large_Airport_Cost <- 10000
 
 Round_Trip_Summary <- Tickets_with_Airport %>%
   group_by(Route, Origin_Airport_Type, Destination_Airport_Type) %>%
-  summarize(total_passengers = sum(PASSENGERS),
-            total_fares = sum(ITIN_FARE)) %>%
+  summarize(total_passengers = sum(PASSENGERS, na.rm = TRUE),
+            total_fares = sum(ITIN_FARE, na.rm = TRUE)) %>%
   arrange(desc(total_passengers))
 
 Busiest_Round_Trips <- Round_Trip_Summary %>%
+  ungroup() %>%
   slice_max(n=10, order_by = total_passengers)
   
 
 # TASK 2: What are the 10 most profitable routes?
 
 Flights_Summary <- Flights %>%
-  mutate(Route = paste0(ORIGIN, DESTINATION))
+  mutate(Route = paste0(ORIGIN, DESTINATION),
+         Route2 = paste0(DESTINATION, ORIGIN)) %>%
+  group_by(Route) %>%
+  summarize(total_dep_delay = sum(Normalized_Dep_Delay, na.rm = TRUE),
+            total_arr_delay = sum(Normalized_Arr_Delay, na.rm = TRUE),
+            total_air_time = sum(AIR_TIME, na.rm = TRUE),
+            route_distance = median(DISTANCE, na.rm = TRUE),
+            occupancy_rate = round(sum(OCCUPANCY_RATE) / n(), 4),
+            total_flights_route = n())
+
+# Need to duplicate inbound and outbound?
+
+Round_Trips_Summary_Expanded <- left_join(Round_Trip_Summary,
+                                          Flights_Summary,
+                                          by = "Route")
 
 
+Round_Trips_Summary_Expanded <- Round_Trips_Summary_Expanded %>%
+  mutate(Per_Mile_Costs = (route_distance * Fuel_Oil_Maint_Crew_per_Mile * total_flights_route) 
+         + (route_distance * Depreciation_Insurance_Other_per_Mile * total_flights_route)) %>%
+  mutate(Delay_Costs = (total_dep_delay * 75) + (total_arr_delay) * 75) %>%
+  mutate(Airport_Cost_Origin = case_when(Origin_Airport_Type == "medium_airport" ~ 5000,
+                                         Origin_Airport_Type == "large_airport" ~ 10000),
+         Airport_Cost_Destination = case_when(Destination_Airport_Type == "medium_airport" ~ 5000,
+                                              Destination_Airport_Type == "large_airport" ~ 10000),
+         Total_Airport_Cost = Airport_Cost_Origin + Airport_Cost_Destination) %>%
+  mutate(TOTAL_COSTS = Per_Mile_Costs + Delay_Costs + Total_Airport_Cost)
 
+Round_Trips_Summary_Expanded <- Round_Trips_Summary_Expanded %>%
+  mutate(Occupancy = (200 * occupancy_rate),
+         Baggage_Revenue = (0.5 * Occupancy * 70 * total_flights_route)) %>%
+  mutate(TOTAL_REVENUE = total_fares + Baggage_Revenue)
 
+Round_Trips_Summary_Expanded <- Round_Trips_Summary_Expanded %>%
+  mutate(Profit = TOTAL_REVENUE - TOTAL_COSTS) %>%
+  arrange(desc(Profit))
 
-
-
-
-# TASK 1: What are the 10 BUSIEST ROUND TRIP ROUTES (excl. cancelled flights) for 1Q2019?
-# 1A: Aggregate to Round Trips
-
-Flights_In <- Flights %>%
-  mutate(match_key = paste0(OP_CARRIER, ORIGIN, DESTINATION)) %>%
-  group_by(match_key, OP_CARRIER, DESTINATION, ORIGIN) %>%
-  summarize(total_dep_delay = sum(DEP_DELAY),
-  total_arr_delay = sum(ARR_DELAY),
-  total_air_time = sum(AIR_TIME),
-  route_distance = median(DISTANCE),
-  mean_occupancy_rate = mean(OCCUPANCY_RATE),
-  total_flights_route = n())
-
-Flights_Out <- Flights %>%
-  mutate(match_key = paste0(OP_CARRIER, DESTINATION, ORIGIN))%>%
-  group_by(match_key, OP_CARRIER, DESTINATION, ORIGIN) %>%
-  summarize(total_dep_delay = sum(DEP_DELAY),
-  total_arr_delay = sum(ARR_DELAY),
-  total_air_time = sum(AIR_TIME),
-  route_distance = median(DISTANCE),
-  mean_occupancy_rate = mean(OCCUPANCY_RATE),
-  total_flights_route = n())
-
-Round_Trip <- inner_join(Flights_In, Flights_Out, by = "match_key", suffix = c("_In", "_Out"))
-
-# 1B: Select Busiest from Round Trips
-
-Busiest_Routes <- Round_Trip %>%
-  group_by(ORIGIN) %>% # Placeholder for round trip
-  summarize(trips = n()) %>%
-  arrange(desc(trips)) %>%
-  slice_head(n = 10)
-
-# TASK 2: Top 10 Most Profitable Routes?
-
-Round_Trip <- Round_Trip %>%
-  mutate(Per_Mile_Cost = (DISTANCE * Fuel_Oil_Maint_Crew_per_Mile) + (DISTANCE * Depreciation_Insurance_Other_per_Mile)) %>%
-  mutate(Delay_Cost = if_else(DEP_DELAY > 15, ((DEP_DELAY - 15) * 75), 0)) 
+Most_Profitable_Routes <- Round_Trips_Summary_Expanded %>%
+  ungroup() %>%
+  slice_max(Profit, n = 10)
