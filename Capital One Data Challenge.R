@@ -22,13 +22,13 @@ Metadata <- read_xlsx('./data/Airline_Challenge_Metadata.xlsx')
 
 Flights <- Flights %>%
   filter(CANCELLED == 0.00) %>%
-  mutate(DISTANCE = replace_na(as.numeric(DISTANCE), 0),
-         AIR_TIME = replace_na(as.numeric(AIR_TIME), 0)) %>%
-  mutate(Normalized_Dep_Delay = if_else(Flights$DEP_DELAY > 15,
-                                        Flights$DEP_DELAY - 15,
+  mutate(DISTANCE = suppressWarnings(as.numeric(DISTANCE)),
+         AIR_TIME = suppressWarnings(as.numeric(AIR_TIME))) %>%
+  mutate(Normalized_Dep_Delay = if_else(DEP_DELAY > 15,
+                                        DEP_DELAY - 15,
                                         0),
-         Normalized_Arr_Delay = if_else(Flights$ARR_DELAY > 15,
-                                        Flights$ARR_DELAY - 15,
+         Normalized_Arr_Delay = if_else(ARR_DELAY > 15,
+                                        ARR_DELAY - 15,
                                         0))
 
 Airport_Codes <- Airport_Codes %>%
@@ -50,8 +50,7 @@ Tickets_with_Airport <- left_join(Tickets_with_Airport,
 Tickets_with_Airport <- Tickets_with_Airport %>%
   select(1:12,
          Origin_Airport_Type = TYPE.x,
-         Destination_Airport_Type = TYPE.y) %>%
-  mutate(Route = paste0(ORIGIN, DESTINATION))
+         Destination_Airport_Type = TYPE.y)
 
 # Step 0.4: Record Assumptions and Scalar Values
 
@@ -65,10 +64,25 @@ Large_Airport_Cost <- 10000
 
 # TASK 1: What are the 10 BUSIEST ROUND TRIPS? #####
 
+Tickets_with_Airport <- Tickets_with_Airport %>%
+  mutate(Route = paste0(pmin(ORIGIN, DESTINATION),
+                        pmax(ORIGIN, DESTINATION))) %>%
+  mutate(Airport_Cost = case_when(
+    Origin_Airport_Type == "medium_airport" & Destination_Airport_Type == "medium_airport" ~ 10000,
+    Origin_Airport_Type == "medium_airport" & Destination_Airport_Type == "large_airport" ~ 15000,
+    Origin_Airport_Type == "large_airport" & Destination_Airport_Type == "medium_airport" ~ 15000,
+    Origin_Airport_Type == "large_airport" & Destination_Airport_Type == "large_airport" ~ 20000,
+    .default = 0
+  ))
+
+# Use of pmin() and pmax() allows for identical pairs for Origin A -> Dest B and
+# Origin B -> Dest A
+
 Round_Trip_Summary <- Tickets_with_Airport %>%
-  group_by(Route, Origin_Airport_Type, Destination_Airport_Type) %>%
+  group_by(Route) %>%
   summarize(total_passengers = sum(PASSENGERS, na.rm = TRUE),
-            total_fares = sum(ITIN_FARE, na.rm = TRUE)) %>%
+            total_fares = sum(ITIN_FARE, na.rm = TRUE),
+            route_airport_cost = mean(Airport_Cost)) %>%
   arrange(desc(total_passengers))
 
 Busiest_Round_Trips <- Round_Trip_Summary %>%
@@ -78,21 +92,21 @@ Busiest_Round_Trips <- Round_Trip_Summary %>%
 
 # TASK 2: What are the 10 most profitable routes? #####
 
-Flights_Summary <- Flights %>%
-  mutate(Route = paste0(ORIGIN, DESTINATION),
-         Route2 = paste0(DESTINATION, ORIGIN)) %>%
+Flights_ <- Flights %>%
+  mutate(Route = paste0(pmin(ORIGIN, DESTINATION),
+                        pmax(ORIGIN, DESTINATION))) %>%
   group_by(Route) %>%
   summarize(total_dep_delay = sum(Normalized_Dep_Delay, na.rm = TRUE),
             total_arr_delay = sum(Normalized_Arr_Delay, na.rm = TRUE),
             total_air_time = sum(AIR_TIME, na.rm = TRUE),
             route_distance = median(DISTANCE, na.rm = TRUE),
-            occupancy_rate = round(sum(OCCUPANCY_RATE) / n(), 4),
+            route_occupancy_rate = round(sum(OCCUPANCY_RATE) / n(), 4),
             total_flights_route = n())
 
-# Need to duplicate inbound and outbound?
+# Merge flight data with ticket data
 
 Round_Trips_Summary_Expanded <- left_join(Round_Trip_Summary,
-                                          Flights_Summary,
+                                          Flights_,
                                           by = "Route")
 
 
@@ -100,15 +114,11 @@ Round_Trips_Summary_Expanded <- Round_Trips_Summary_Expanded %>%
   mutate(Per_Mile_Costs = (route_distance * Fuel_Oil_Maint_Crew_per_Mile * total_flights_route) 
          + (route_distance * Depreciation_Insurance_Other_per_Mile * total_flights_route)) %>%
   mutate(Delay_Costs = (total_dep_delay * 75) + (total_arr_delay) * 75) %>%
-  mutate(Airport_Cost_Origin = case_when(Origin_Airport_Type == "medium_airport" ~ 5000,
-                                         Origin_Airport_Type == "large_airport" ~ 10000),
-         Airport_Cost_Destination = case_when(Destination_Airport_Type == "medium_airport" ~ 5000,
-                                              Destination_Airport_Type == "large_airport" ~ 10000),
-         Total_Airport_Cost = Airport_Cost_Origin + Airport_Cost_Destination) %>%
+  mutate(Total_Airport_Cost = (route_airport_cost * total_flights_route)) %>%
   mutate(TOTAL_COSTS = Per_Mile_Costs + Delay_Costs + Total_Airport_Cost)
 
 Round_Trips_Summary_Expanded <- Round_Trips_Summary_Expanded %>%
-  mutate(Occupancy = (200 * occupancy_rate),
+  mutate(Occupancy = (200 * route_occupancy_rate),
          Baggage_Revenue = (0.5 * Occupancy * 70 * total_flights_route)) %>%
   mutate(TOTAL_REVENUE = total_fares + Baggage_Revenue)
 
@@ -122,25 +132,23 @@ Most_Profitable_Routes <- Round_Trips_Summary_Expanded %>%
 
 # TASK 3: What five routes do you recommend investing in? ####
 
+High_Occupancy <- Round_Trips_Summary_Expanded %>%
+  filter(Occupancy > 100)
 
+Profitable_Routes <- Round_Trips_Summary_Expanded %>%
+  filter(Profit > 0,
+         Route %in% High_Occupancy$Route) %>%
+  slice_max(Profit, n = 5)
+
+Chosen_Routes <- Profitable_Routes$Route
 
 # TASK 4: How long to break even for each route? ####
 Upfront_Cost <- 90000000
 
-Chosen_Routes <- c('HNLOGG',
-                   'PDXSEA',
-                   'HNLLIH',
-                   'HNLKOA',
-                   'LAXLAS') # Placeholder for now
-
 Chosen_Routes_Info <- Round_Trips_Summary_Expanded %>%
   filter(Route %in% Chosen_Routes) %>%
   ungroup() %>%
-  mutate(Per_Trip_Cost = Per_Mile_Costs / route_distance,
-         Per_Trip_Revenue = total_fares + (0.5 * Occupancy * 70)) %>%
-  select(Route, occupancy_rate, Occupancy, Total_Airport_Cost, 
-         Per_Trip_Cost, Per_Trip_Revenue) %>%
-  mutate(Per_Trip_Profit = Per_Trip_Revenue - Per_Trip_Cost) %>%
+  mutate(Per_Trip_Profit = Profit / total_flights_route) %>%
   mutate(Trips_to_Profit = Upfront_Cost / Per_Trip_Profit)
 
 
