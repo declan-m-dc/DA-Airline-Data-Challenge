@@ -1,0 +1,415 @@
+---
+title: "Capital One Data Challenge"
+author: "Declan Murphy"
+date: "2025-09-13"
+output: 
+  prettydoc::html_pretty:
+        theme: tactile
+---
+
+# Data Challenge -- Flights
+The scripts below documents the calculations, transformations, and analysis 
+performed responsive to the Capital One Data Challenge. Specifically,
+this challenge uses real-world flight data to generate insights.
+
+Required packages for this script are **tidyverse**, **readxl**, and **knitr**; 
+the import functions and output are suppressed for improved readability. 
+
+```{r Setup, include = FALSE}
+# Step 0.1: Set Up Environment
+library(tidyverse)
+library(readxl)
+library(knitr)
+```
+
+First, I will read in the source data. All file paths are relative to the 
+project folder (or cloned repository, if using GitHub). The "strip.white" 
+function removes white spaces during import. 
+
+```{r Import data}
+# All file paths are relative to the working directory
+
+Flights <- read.csv('./data/Flights.csv', strip.white = TRUE)
+Tickets <- read.csv('./data/Tickets.csv', strip.white = TRUE)
+Airport_Codes <- read.csv("./data/Airport_Codes.csv", strip.white = TRUE)
+
+Metadata <- read_xlsx('./data/Airline_Challenge_Metadata.xlsx')
+
+```
+
+Then I will clean the data. In doing so, I noted the following data quality issues:
+
+- Null values in Airport_Codes data for IATA_CODE
+- White space in text fields (addressed above during import)
+- Numbers stored as strings -- DISTANCE in the Flights dataset
+- Numbers stored as strings -- AIR_TIME in the Flights dataset
+
+Per the assignment instructions, I filter to remove cancelled flights (CANCELLED == 1)
+and tickets that are *not* round-trip (ROUNDTRIP == 0). 
+
+To join the Airport information to the Ticket data, I left join the Airport Code
+on the Ticket data using the IATA Code, first on the Origin airport and then
+the destination airport, and then select the necessary columns from the result.
+
+In addition to cleaning the data, I create "Normalized" Delay columns, which 
+only tally the minutes beyond 15 minutes (i.e. where the delay penalty kicks in)
+and ignore early arrivals (i.e. where Delay < 0). 
+
+```{r Clean data, warning = FALSE}
+
+Flights <- Flights %>%
+  filter(CANCELLED == 0.00) %>%
+  mutate(DISTANCE = suppressWarnings(as.numeric(DISTANCE)),
+         AIR_TIME = suppressWarnings(as.numeric(AIR_TIME))) %>%
+  mutate(Normalized_Dep_Delay = if_else(DEP_DELAY > 15,
+                                        DEP_DELAY - 15,
+                                        0),
+         Normalized_Arr_Delay = if_else(ARR_DELAY > 15,
+                                        ARR_DELAY - 15,
+                                        0))
+
+Airport_Codes <- Airport_Codes %>%
+  filter(TYPE == "medium_airport" | TYPE == "large_airport") %>% # Filter to medium and large airports
+  filter(IATA_CODE %in% unique(IATA_CODE) & !is.na(IATA_CODE))
+
+Tickets <- Tickets %>%
+  filter(ROUNDTRIP == 1) %>% # Filter to only round trip tickets
+  mutate(ITIN_FARE = replace_na(as.numeric(ITIN_FARE), 0))
+  
+Tickets_with_Airport <- left_join(Tickets, 
+                                  Airport_Codes,
+                                  by = c("ORIGIN" = "IATA_CODE"))
+
+Tickets_with_Airport <- left_join(Tickets_with_Airport,
+                                  Airport_Codes,
+                                  by = c("DESTINATION" = "IATA_CODE"))
+
+Tickets_with_Airport <- Tickets_with_Airport %>%
+  select(1:12,
+         Origin_Airport_Type = TYPE.x,
+         Destination_Airport_Type = TYPE.y)
+
+```
+
+Finally, per the instructions, I will record the values assumed for 
+per-mile and fixed costs, to reference later in the analysis.
+
+```{r Record Assumptions}
+# Per the instructions, we can assume the following (scalar) values for use later one:
+Fuel_Oil_Maint_Crew_per_Mile <- 8.00
+Depreciation_Insurance_Other_per_Mile <- 1.18
+Per_Mile_Costs <- Fuel_Oil_Maint_Crew_per_Mile + Depreciation_Insurance_Other_per_Mile
+Medium_Airport_Cost <- 5000
+Large_Airport_Cost <- 10000
+Max_Occupancy <- 200 # Max occupancy of each airplane
+Upfront_Cost <- 90000000 # Upfront cost of each airplane
+```
+
+## TASK 1
+For the first task, I want to determine *what are the ten busiest round trip 
+routes*? 
+
+To aggregate to round trip routes, I first create a unique "Route" key using
+pmin() and pmax(). Pmin() and pmax() return the parallel minimum and maximum (respecitvely)
+for the input values. This ensures that routes are correctly grouped, such that
+Origin A and Destination B are paired with Origin B and Destination A, e.g. 
+
+Having done so, I create the Airport_Cost field using a case_when() statement 
+based on the origin and destination airports. 
+
+Once that data is arranged, I can group by the route and create summary metrics.
+Specifically, I sum the passengers field from the Tickets dataset, as well as the 
+total of all fares, and take the mean value of the airport cost calculated above
+(for later use).
+
+```{r Task 1}
+
+Tickets_with_Airport <- Tickets_with_Airport %>%
+  mutate(Route = paste0(pmin(ORIGIN, DESTINATION),
+                        pmax(ORIGIN, DESTINATION))) %>%
+  mutate(Airport_Cost = case_when(
+    Origin_Airport_Type == "medium_airport" & Destination_Airport_Type == "medium_airport" ~ 10000,
+    Origin_Airport_Type == "medium_airport" & Destination_Airport_Type == "large_airport" ~ 15000,
+    Origin_Airport_Type == "large_airport" & Destination_Airport_Type == "medium_airport" ~ 15000,
+    Origin_Airport_Type == "large_airport" & Destination_Airport_Type == "large_airport" ~ 20000,
+    .default = 0
+  ))
+
+# Use of pmin() and pmax() allows for pairing of routes with Origin A -> Dest B
+# and Origin B -> Dest A
+
+Round_Trips_Summary <- Tickets_with_Airport %>%
+  group_by(Route) %>%
+  summarize(total_passengers = sum(PASSENGERS, na.rm = TRUE),
+            total_fares = sum(ITIN_FARE, na.rm = TRUE),
+            route_airport_cost = mean(Airport_Cost)) %>%
+  arrange(desc(total_passengers))
+
+```
+
+Now I will merge in the flight data. Analogous to the above, I first create the
+"Route" key using pmin() and pmax(), then group by Route and create summary 
+metrics for the route.
+
+Finally, I can left join the Round_Trip_Summary dataframe to the Flight_Summary
+data to have all necessary metrics. 
+
+```{r Merge in flight data}
+Flights_Summary <- Flights %>%
+  mutate(Route = paste0(pmin(ORIGIN, DESTINATION),
+                        pmax(ORIGIN, DESTINATION))) %>%
+  group_by(Route) %>%
+  summarize(total_dep_delay = sum(Normalized_Dep_Delay, na.rm = TRUE),
+            total_arr_delay = sum(Normalized_Arr_Delay, na.rm = TRUE),
+            total_air_time = sum(AIR_TIME, na.rm = TRUE),
+            route_distance = median(DISTANCE, na.rm = TRUE),
+            route_occupancy_rate = round(sum(OCCUPANCY_RATE) / n(), 4),
+            total_flights_route = n())
+
+# Merge flight data with ticket data
+
+Round_Trips_Summary_Expanded <- left_join(Round_Trips_Summary,
+                                          Flights_Summary,
+                                          by = "Route")
+```
+
+With all the necessary data joined and summarized, I can sort by the number of 
+flights and return the top 10 routes. 
+
+```{r Sort and return busiest routes}
+
+Busiest_Round_Trips <- Round_Trips_Summary_Expanded %>%
+  ungroup() %>%
+  slice_max(n=10, order_by = total_passengers)
+
+kable(Busiest_Round_Trips$Route, col.names = "Busiest Routes")
+```
+
+## TASK 2
+
+For the second task, I need to find the routes with are the most *profitable*. To
+do so, I want to find the total costs on each route, the total revenue, and 
+naturally subtract costs from revenue to find profit.
+
+As a reminder, the total costs consist of:
+- Fuel, Oil, Maintenance, and Crew: $8:00 per mile
+- Depreciation, Insurance, and Other: $1.18 per mile
+- Delay Costs: $75 per minute for each minute after 15 minutes of delay
+- Airport Costs: a fixed fee depending on airport size at the origin and destination.
+
+For per-mile costs, I take the sum of the two per-mile factors ($9.18) and
+multiply that by the route distance and number of flights. For example,
+a route with a distance of 200 miles that provided 500 flights would have a 
+total per-mile cost of 200 * 500 * \$9.18 = \$918,000 dollars.
+
+In a previous steps, I already normalized the delay fields to only return the
+minutes greater than 15, and these have been aggregated to the total minutes of 
+delay (above 15) for departure and arrival. Thus, I can simply take these and
+multiply them by 75 per-minute cost, and sum the departure and arrival costs.
+
+In earlier steps, I already created the Airport Cost field for each route, so 
+I just multiply this cost by the number of flights. 
+
+Summing all the cost values gives us the total cost for the route. 
+
+```{r Create costs}
+Round_Trips_Summary_Expanded <- Round_Trips_Summary_Expanded %>%
+  mutate(Route_Per_Mile_Costs = Per_Mile_Costs * route_distance * total_flights_route) %>%
+  mutate(Delay_Costs = (total_dep_delay * 75) + (total_arr_delay * 75)) %>%
+  mutate(Total_Airport_Cost = (route_airport_cost * total_flights_route)) %>%
+  mutate(TOTAL_COSTS = Route_Per_Mile_Costs + Delay_Costs + Total_Airport_Cost)
+```
+
+Similarly, I create revenue using the given parameters. The components of revenue
+are:
+- Fares
+- Baggage: \$70 per passenger (roundtrip) for an expected 50% of passengers
+
+Total fares have been created in a prior step using the ticket dataset.
+
+Baggage revenue can be found by first taking the estimated occupancy, 
+which is the product of the occupancy rate and 200 (the assumed max occupancy).
+The resulting number of passengers can be halved and multiplied by 70 to get 
+the baggage fare per flight, and multiplied by the total flights to get overall 
+baggage revenue.
+
+Finally, I sum fare revenue and baggage to get total revenue. 
+
+```{r Create revenue}
+Round_Trips_Summary_Expanded <- Round_Trips_Summary_Expanded %>%
+  mutate(Occupancy = (Max_Occupancy * route_occupancy_rate),
+         Baggage_Revenue = (0.5 * Occupancy * 70 * total_flights_route)) %>%
+  mutate(TOTAL_REVENUE = total_fares + Baggage_Revenue)
+```
+
+Profit, then, is just the difference between the total revenue calculated 
+above and the total costs calculated above for each route. 
+
+```{r Create profit}
+Round_Trips_Summary_Expanded <- Round_Trips_Summary_Expanded %>%
+  mutate(Profit = (TOTAL_REVENUE - TOTAL_COSTS)) %>%
+  arrange(desc(Profit))
+```
+
+I then sort by profit and take the 10 routes with the highest profit.
+
+```{r Select most profitable routes}
+Most_Profitable_Routes <- Round_Trips_Summary_Expanded %>%
+  ungroup() %>%
+  slice_max(Profit, n = 10)
+
+kable(Most_Profitable_Routes$Route, col.names = "Most Profitable Routes")
+```
+
+This information is already represented here in a bar graph (below),
+arranged by greatest total revenue. 
+
+```{r Task 2 Visual, fig.dim = c(8, 4)}
+Most_Profitable_Routes_bar <- pivot_longer(Most_Profitable_Routes,
+                                           cols = c("TOTAL_COSTS",
+                                                    "TOTAL_REVENUE",
+                                                    "Profit"),
+                                           values_to = "Value")
+
+Graph1 <- ggplot(Most_Profitable_Routes_bar) +
+  geom_bar(aes(fill = name,
+               y = Value,
+               x = reorder(Route, -Value)),
+           position = "dodge",
+           stat = "identity") +
+  scale_y_continuous(name = "Value (Millions of Dollars)",
+  breaks = c(1000000, 2000000, 3000000, 4000000, 5000000),
+  labels = c(1, 2, 3, 4, 5)) +
+  scale_fill_manual(values = c("#26B800", "#CC0000", "#001ED9"),
+                    labels = c("Profit", "Total Costs", "Total Revenue")) +
+  theme_minimal()
+
+Graph1
+
+```
+
+## TASK 3
+
+In recommending routes to invest in, I consider the following criteria:
+1. Which routes are profitable?
+2. Which routes have high occupancy already -- and therefore could likely support
+a new service offering?
+
+The latter is the key component for me -- a route must be sufficiently busy 
+that there will still be customer demand when a new service is offered. 
+If a route is (currently) profitable with less than 50% mean occupancy, 
+it is unlikely to still be profitable with even more sparsely populated flights.
+
+Thus, for this exercise, I filter to flights with Occupancy over 50% (100 passengers),
+and *subsequently* filter those to profitable flights. Finally, I take the top
+5 of these options sorted by profit. 
+
+I also visualize the trendline of occupancy versus profit, to show both a
+positive correlation between occupancy and profit, and to highlight the 
+routes that stand above. Note that the observations above the trend line reflect
+the routes that I've chosen. 
+
+```{r Task 3}
+
+Profitable_Routes <- Round_Trips_Summary_Expanded %>%
+  filter(Profit > 0)
+
+Occupancy_vs_Profit <- ggplot(Profitable_Routes,
+                              aes(x = Occupancy, y = Profit)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  geom_text(aes(label = Route),
+            nudge_y = 0.5) +
+  theme_minimal()
+
+Occupancy_vs_Profit
+
+High_Occupancy <- Round_Trips_Summary_Expanded %>%
+  filter(Occupancy > 100)
+
+Profitable_Routes <- Profitable_Routes %>%
+  filter(Route %in% High_Occupancy$Route) %>%
+  slice_max(Profit, n = 5)
+
+Chosen_Routes <- Profitable_Routes$Route
+
+print(Chosen_Routes)
+```
+
+## TASK 4
+Given the choice of routes above, how many flights will it take for each one to
+break even?
+
+To reiterate, the upfront cost of each airplane is \$90,000,000.
+
+Using the total profit generated in step 2, I divide by the total number of flights
+to get per-route profit. I then divide by the upfront cost to get the 
+number of flights to breakeven. 
+
+A bar graph showing this information for each flight is also included. 
+
+```{r Task 4, fig.width= c(8, 4)}
+
+Upfront_Cost
+
+Chosen_Routes_Info <- Round_Trips_Summary_Expanded %>%
+  filter(Route %in% Chosen_Routes) %>%
+  ungroup() %>%
+  mutate(Per_Trip_Profit = Profit / total_flights_route) %>%
+  mutate(Trips_to_Profit = round(Upfront_Cost / Per_Trip_Profit, 0))
+
+Chosen_Routes_Summary_Table <- Chosen_Routes_Info %>%
+  select(Route, Trips_to_Profit)
+
+kable(Chosen_Routes_Summary_Table)
+
+Chosen_Routes_Bar <- ggplot(Chosen_Routes_Info) +
+  geom_col(aes(x = reorder(Route, -Trips_to_Profit),
+               y = Trips_to_Profit,
+               color = "blue")) +
+  theme_minimal()
+
+Chosen_Routes_Bar
+```
+
+## TASK 5
+
+The following are proposed KPI's to monitor for these routes once implemented:
+
+1. **On-Time Percentage** -- What percentage of flights are on-time (i.e. no delays)?
+Once implemented, this can also be used to identify causal factors influencing delays.
+2. **Average Delay** -- Related to the above: when delays occur, how long are they? 
+Monitoring and reducing delays will reduce the associated costs. 
+3. **Occupancy Rate** -- How full are these flights? How can they be better scheduled
+and/or priced to maximize occupancy?
+4. **Average Ticket Price** -- What prices are consumers paying for these routes?
+Are these trending upward or downward? Can we identify seasonality or other 
+notable patterns?
+5. **Percent of Flights Cancelled** -- What percentage of flights are fully
+cancelled? What are the underlying factors and how can we address those?
+
+## Conclusion and Next Steps
+
+To reiterate, I recommended investing in these five routes:
+
+```{r Conclusion 1}
+Route_Names_Clean <- paste(substr(Chosen_Routes_Info$Route, 1, 3),
+                           " round trip to ",
+                           substr(Chosen_Routes_Info$Route, 4, 6))
+
+kable(Route_Names_Clean, col.names = "Routes")
+```
+Using the metrics in Task 5, I will monitor these routes to ensure high performance
+and address issues as they arise. 
+
+With additional time, it would be ideal to have data on:
+- Customer satisfaction with existing service / airlines
+- Potential for dynamic pricing of baggage, and more flexible assumptions 
+about charges for baggage fees
+- Additional quarters of flight and ticket data, to see if these patterns 
+hold for an entire fiscal year, e.g.
+
+Overall, though, these is value in the data in hand and its ability to inform
+decision making. This initial analysis, while by no means comprehensive,
+demonstrates how I can leverage real world data sets to generate actionable
+insights. 
