@@ -177,13 +177,19 @@ Round_Trips_Summary_Expanded <- left_join(Round_Trips_Summary,
 With all the necessary data joined and summarized, I can sort by the number of 
 flights and return the top 10 routes. 
 
-```{r Sort and return busiest routes}
-
+```{r Sort busiest routes}
 Busiest_Round_Trips <- Round_Trips_Summary_Expanded %>%
   ungroup() %>%
   slice_max(n=10, order_by = total_passengers)
+```
 
-kable(Busiest_Round_Trips$Route, col.names = "Busiest Routes")
+
+```{r Return busiest route names}
+Busiest_Round_Trips$Route_Clean <- paste(substr(Busiest_Round_Trips$Route, 1, 3),
+                           " round trip to ",
+                           substr(Busiest_Round_Trips$Route, 4, 6))
+
+kable(Busiest_Round_Trips$Route_Clean, col.names = "Busiest Routes")
 ```
 
 ## TASK 2
@@ -262,7 +268,10 @@ Most_Profitable_Routes <- Round_Trips_Summary_Expanded %>%
   ungroup() %>%
   slice_max(Profit, n = 10)
 
-kable(Most_Profitable_Routes$Route, col.names = "Most Profitable Routes")
+kable(paste0(substr(Most_Profitable_Routes$Route, 1, 3),
+             " round trip to ",
+             substr(Most_Profitable_Routes$Route, 4, 6)),
+      col.names = "Most Profitable Routes")
 ```
 
 This information is already represented here in a bar graph (below),
@@ -318,7 +327,6 @@ routes that stand above. Note that the observations above the trend line reflect
 the routes that I've chosen. 
 
 ```{r Task 3}
-
 Profitable_Routes <- Round_Trips_Summary_Expanded %>%
   filter(Profit > 0)
 
@@ -341,8 +349,15 @@ Profitable_Routes <- Profitable_Routes %>%
   slice_max(Profit, n = 5)
 
 Chosen_Routes <- Profitable_Routes$Route
+```
 
-print(Chosen_Routes)
+
+```{r Task 3 print, echo = FALSE}
+Chosen_Routes_Clean <- paste(substr(Chosen_Routes, 1, 3),
+                           " round trip to ",
+                           substr(Chosen_Routes, 4, 6))
+
+kable(Chosen_Routes_Clean, col.names = "Routes")
 ```
 
 ## TASK 4
