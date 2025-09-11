@@ -12,8 +12,9 @@ The scripts below documents the calculations, transformations, and analysis
 performed responsive to the Capital One Data Challenge. Specifically,
 this challenge uses real-world flight data to generate insights.
 
-Required packages for this script are **tidyverse**, **readxl**, and **knitr**; 
-the import functions and output are suppressed for improved readability. 
+Required packages for this script are **tidyverse**, **readxl** (to read in the
+Excel file containing metadata), and **knitr**;  the import functions and 
+output are suppressed for improved readability. 
 
 ```{r Setup, include = FALSE}
 # Step 0.1: Set Up Environment
@@ -115,12 +116,12 @@ for the input values. This ensures that routes are correctly grouped, such that
 Origin A and Destination B are paired with Origin B and Destination A, e.g. 
 
 Having done so, I create the Airport_Cost field using a case_when() statement 
-based on the origin and destination airports. 
+based on the size classification of the origin and destination airports. 
 
 Once that data is arranged, I can group by the route and create summary metrics.
-Specifically, I sum the passengers field from the Tickets dataset, as well as the 
-total of all fares, and take the mean value of the airport cost calculated above
-(for later use).
+Specifically, I sum the *PASSENGERS* field from the Tickets dataset, as well as the 
+total of all fares (ITIN_FARE), and take the mean value of the airport cost 
+calculated above for later use.
 
 ```{r Task 1}
 
@@ -192,22 +193,23 @@ do so, I want to find the total costs on each route, the total revenue, and
 naturally subtract costs from revenue to find profit.
 
 As a reminder, the total costs consist of:
-- Fuel, Oil, Maintenance, and Crew: $8:00 per mile
-- Depreciation, Insurance, and Other: $1.18 per mile
-- Delay Costs: $75 per minute for each minute after 15 minutes of delay
+
+- Fuel, Oil, Maintenance, and Crew: \$8:00 per mile
+- Depreciation, Insurance, and Other: \$1.18 per mile
+- Delay Costs: \$75 per minute for each minute after 15 minutes of delay
 - Airport Costs: a fixed fee depending on airport size at the origin and destination.
 
-For per-mile costs, I take the sum of the two per-mile factors ($9.18) and
+For per-mile costs, I take the sum of the two per-mile factors (\$9.18) and
 multiply that by the route distance and number of flights. For example,
 a route with a distance of 200 miles that provided 500 flights would have a 
 total per-mile cost of 200 * 500 * \$9.18 = \$918,000 dollars.
 
-In a previous steps, I already normalized the delay fields to only return the
+In a previous steps, I normalized the delay fields to only return the
 minutes greater than 15, and these have been aggregated to the total minutes of 
 delay (above 15) for departure and arrival. Thus, I can simply take these and
-multiply them by 75 per-minute cost, and sum the departure and arrival costs.
+multiply them by 75 per-minute cost, and sum the departure and arrival delay costs.
 
-In earlier steps, I already created the Airport Cost field for each route, so 
+In earlier steps, I created the Airport Cost field for each route, so 
 I just multiply this cost by the number of flights. 
 
 Summing all the cost values gives us the total cost for the route. 
@@ -222,10 +224,12 @@ Round_Trips_Summary_Expanded <- Round_Trips_Summary_Expanded %>%
 
 Similarly, I create revenue using the given parameters. The components of revenue
 are:
+
 - Fares
 - Baggage: \$70 per passenger (roundtrip) for an expected 50% of passengers
 
-Total fares have been created in a prior step using the ticket dataset.
+Total fares have been created in a prior step using the Tickets dataset,
+grouped and summed by the route.
 
 Baggage revenue can be found by first taking the estimated occupancy, 
 which is the product of the occupancy rate and 200 (the assumed max occupancy).
@@ -262,7 +266,7 @@ kable(Most_Profitable_Routes$Route, col.names = "Most Profitable Routes")
 ```
 
 This information is already represented here in a bar graph (below),
-arranged by greatest total revenue. 
+arranged in descending order by revenue. 
 
 ```{r Task 2 Visual, fig.dim = c(8, 4)}
 Most_Profitable_Routes_bar <- pivot_longer(Most_Profitable_Routes,
@@ -271,7 +275,7 @@ Most_Profitable_Routes_bar <- pivot_longer(Most_Profitable_Routes,
                                                     "Profit"),
                                            values_to = "Value")
 
-Graph1 <- ggplot(Most_Profitable_Routes_bar) +
+Profitable_Routes_bar <- ggplot(Most_Profitable_Routes_bar) +
   geom_bar(aes(fill = name,
                y = Value,
                x = reorder(Route, -Value)),
@@ -281,16 +285,20 @@ Graph1 <- ggplot(Most_Profitable_Routes_bar) +
   breaks = c(1000000, 2000000, 3000000, 4000000, 5000000),
   labels = c(1, 2, 3, 4, 5)) +
   scale_fill_manual(values = c("#26B800", "#CC0000", "#001ED9"),
-                    labels = c("Profit", "Total Costs", "Total Revenue")) +
+                    labels = c("Profit", "Total Costs", "Total Revenue"),
+                    name = "Metric") +
+  labs(title = "Most Profitable Round Trip Rounds, Q12019") +
+  xlab("Route") +
   theme_minimal()
 
-Graph1
+Profitable_Routes_bar
 
 ```
 
 ## TASK 3
 
 In recommending routes to invest in, I consider the following criteria:
+
 1. Which routes are profitable?
 2. Which routes have high occupancy already -- and therefore could likely support
 a new service offering?
@@ -320,6 +328,7 @@ Occupancy_vs_Profit <- ggplot(Profitable_Routes,
   geom_smooth(method = "lm", se = FALSE) +
   geom_text(aes(label = Route),
             nudge_y = 0.5) +
+  labs(title = "Occupancy Rate versus Total Profit by Round-Trip Route") +
   theme_minimal()
 
 Occupancy_vs_Profit
@@ -348,7 +357,7 @@ number of flights to breakeven.
 
 A bar graph showing this information for each flight is also included. 
 
-```{r Task 4, fig.width= c(8, 4)}
+```{r Task 4, fig.width= c(8, 8)}
 
 Upfront_Cost
 
@@ -359,14 +368,19 @@ Chosen_Routes_Info <- Round_Trips_Summary_Expanded %>%
   mutate(Trips_to_Profit = round(Upfront_Cost / Per_Trip_Profit, 0))
 
 Chosen_Routes_Summary_Table <- Chosen_Routes_Info %>%
-  select(Route, Trips_to_Profit)
+  select(Route, Trips_to_Profit) %>%
+  arrange(desc(Trips_to_Profit))
 
 kable(Chosen_Routes_Summary_Table)
 
 Chosen_Routes_Bar <- ggplot(Chosen_Routes_Info) +
-  geom_col(aes(x = reorder(Route, -Trips_to_Profit),
-               y = Trips_to_Profit,
-               color = "blue")) +
+  geom_col(aes(x = reorder(Route, Trips_to_Profit),
+               y = Trips_to_Profit),
+           fill = "#001ED9",
+           show.legend = FALSE)+
+  labs(title = "Number of Trips Before Profitability for Selected Round Trip Routes") + 
+  xlab("Route") +
+  ylab("Trips Until Profitability") +
   theme_minimal()
 
 Chosen_Routes_Bar
@@ -392,7 +406,7 @@ cancelled? What are the underlying factors and how can we address those?
 
 To reiterate, I recommended investing in these five routes:
 
-```{r Conclusion 1}
+```{r Conclusion 1, echo=FALSE}
 Route_Names_Clean <- paste(substr(Chosen_Routes_Info$Route, 1, 3),
                            " round trip to ",
                            substr(Chosen_Routes_Info$Route, 4, 6))
@@ -403,6 +417,7 @@ Using the metrics in Task 5, I will monitor these routes to ensure high performa
 and address issues as they arise. 
 
 With additional time, it would be ideal to have data on:
+
 - Customer satisfaction with existing service / airlines
 - Potential for dynamic pricing of baggage, and more flexible assumptions 
 about charges for baggage fees
