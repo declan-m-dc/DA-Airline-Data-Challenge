@@ -21,6 +21,8 @@ output are suppressed for improved readability.
 library(tidyverse)
 library(readxl)
 library(knitr)
+
+options(scipen = 999)
 ```
 
 First, I will read in the source data. All file paths are relative to the 
